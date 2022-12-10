@@ -7,10 +7,12 @@ use std::str::FromStr;
 use std::{collections::BTreeMap, time::Duration};
 
 use fluvio::{
-    Compression, FluvioConfig, SmartModuleContextData, SmartModuleExtraParams,
+    Compression, Fluvio, FluvioConfig, SmartModuleContextData, SmartModuleExtraParams,
     SmartModuleInvocation, SmartModuleInvocationWasm, SmartModuleKind,
 };
 use serde::Deserialize;
+
+use crate::monitoring::init_monitoring;
 
 #[derive(Parser, Debug, JsonSchema, Clone, Default)]
 #[clap(settings = &[AppSettings::DeriveDisplayOrder])]
@@ -76,7 +78,8 @@ impl CommonConnectorOpt {
         cluster_config.client_id = Some(format!("fluvio_connector_{}", connector_name));
 
         let fluvio = fluvio::Fluvio::connect_with_config(&cluster_config).await?;
-        self.ensure_topic_exists().await?;
+        init_monitoring(fluvio.metrics());
+        self.ensure_topic_exists(&fluvio).await?;
         let config_builder = fluvio::TopicProducerConfigBuilder::default();
 
         // Linger
@@ -115,8 +118,16 @@ impl CommonConnectorOpt {
 #[cfg(feature = "sink")]
 impl CommonConnectorOpt {
     pub async fn create_consumer(&self) -> anyhow::Result<fluvio::PartitionConsumer> {
-        self.ensure_topic_exists().await?;
-        Ok(fluvio::consumer(&self.fluvio_topic, self.consumer_common.consumer_partition).await?)
+        let fluvio = fluvio::Fluvio::connect().await?;
+
+        self.ensure_topic_exists(&fluvio).await?;
+
+        Ok(fluvio
+            .partition_consumer(
+                self.fluvio_topic.to_owned(),
+                self.consumer_common.consumer_partition,
+            )
+            .await?)
     }
 
     pub async fn create_consumer_stream(
@@ -154,8 +165,8 @@ impl CommonConnectorOpt {
         }
         fluvio_future::subscriber::init_logger();
     }
-    pub async fn ensure_topic_exists(&self) -> anyhow::Result<()> {
-        let admin = fluvio::FluvioAdmin::connect().await?;
+    pub async fn ensure_topic_exists(&self, fluvio_client: &Fluvio) -> anyhow::Result<()> {
+        let admin = fluvio_client.admin().await;
         let topics = admin.list::<TopicSpec, String>(vec![]).await?;
         let topic_exists = topics.iter().any(|t| t.name == self.fluvio_topic);
         if !topic_exists {
